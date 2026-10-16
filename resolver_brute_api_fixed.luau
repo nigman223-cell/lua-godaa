@@ -18,6 +18,7 @@ local enabled = group:switch("Enable resolver", true)
 local safe_first = group:switch("Safe angle first", true)
 local brute = group:switch("Auto brute counter", true)
 local reset_on_hit = group:switch("Reset brute on hit", true)
+local keep_confident = group:switch("Keep confident native angle", true)
 local brute_steps = per_weapon(group:slider("Brute steps", 1, 7, 5))
 local start_mode = per_weapon(group:combo("Initial angle", {
     "Body yaw",
@@ -159,6 +160,18 @@ local function on_resolve(ctx)
     if ctx.overridable ~= true then return end
 
     local s = get_state(ctx)
+    if keep_confident:get() then
+        local native = ctx:original()
+        if type(native) == "table" and native.confidence == 2 then
+            if s.last_step ~= "native" then
+                s.last_step = "native"
+                debug_log(string.format("#%s keeping confident native yaw %.0f misses %d",
+                    tostring(ctx.index), tonumber(native.yaw) or 0, s.misses))
+            end
+            return
+        end
+    end
+
     local candidates = build_candidates(ctx)
     if #candidates == 0 then return end
 
