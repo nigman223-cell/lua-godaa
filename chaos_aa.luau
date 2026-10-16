@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 318: Real / Hide head (freestand or away), fake sent opposite a script-placed real")
+print("CHAOS BUILD CHECK 319: anti-aim flags in the HUD indicator list")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -76,6 +76,7 @@ for _, item in ipairs(keys) do item.control:set_mode("hold") end
 c.clear = control("real", 2, "hotkey", "Direction / clear")
 c.report = control("lag", 2, "button", "Diagnostics / Print status")
 c.indicator = control("lag", 2, "switch", "Diagnostics / Indicator", true)
+c.flags = control("lag", 2, "switch", "Diagnostics / Anti-aim flags", true)
 c.shotLog = control("lag", 2, "switch", "Diagnostics / Log enemy shots", false)
 local misc = ui.create("Misc", "Chaos AA", 1)
 local logChoices = {"Chat", "Both", "Console"}
@@ -149,6 +150,7 @@ local tips = {
     clear = "Clear the script's manual direction; base yaw returns to normal.",
     report = "Print angle state, cycle counters, and hook owners to the console.",
     indicator = "Show CHAOS in the HUD indicator list while alive.",
+    flags = "Show anti-aim state flags in the HUD indicator list: MANUAL, HIDE, FAKE, CHOKE and FW FLIP. Green means active this moment.",
     shotLog = "Print each enemy shot at you with the anti-aim state and desync.",
     logOutput = "Where Chaos logs go. Chat (local only, never sent) keeps them out of engine console spam; falls back to console when chat is unavailable.",
     filterHelp = "Print the console commands that hide engine spam such as CMaterial::PrecacheVars.",
@@ -185,6 +187,31 @@ end
 local status = "waiting for alive player"
 local indicator = type(indicators) == "table" and type(indicators.add) == "function"
     and indicators.add("chaos_aa3", "CHAOS") or nil
+-- Each flag returns its text when it applies; active() decides green (working now) or red (armed).
+local flagList = {
+    {name = "chaos_manual", text = function() return chosen and "MANUAL " .. string.upper(chosen) end},
+    {name = "chaos_hide", text = function() return c.hideReal:get() > 1 and "HIDE" end,
+        active = function() return s.hidden end},
+    {name = "chaos_fake", text = function() return (c.fake:get() or c.shotFlip:get() or s.hidden) and "FAKE" end,
+        active = function(command) return s.fakeCommand ~= nil and command - s.fakeCommand < 16 end},
+    {name = "chaos_choke", text = function() return c.packet:get() and s.lagTarget and "CHOKE " .. s.lagTarget end},
+    {name = "chaos_flip", text = function() return c.shotFlip:get() and s.fakewalking and "FW FLIP" end},
+}
+if indicator then
+    for _, flag in ipairs(flagList) do flag.handle = indicators.add(flag.name, "CHAOS") end
+end
+local function updateFlags(command, shown)
+    for _, flag in ipairs(flagList) do
+        local handle = flag.handle
+        if handle then
+            local text = shown and flag.text() or nil
+            handle:set_enabled(text ~= nil and text ~= false)
+            if text and text ~= flag.shownText then handle:set_text(text) end
+            flag.shownText = text
+            if text then handle:set_active(flag.active == nil or flag.active(command) == true) end
+        end
+    end
+end
 local function reset()
     s = {cycle = 0, fakeCycle = 0, command = nil, session = nil, previousLag = nil,
         breakerCount = 0, breakerKey = nil, realSamples = 0, fakeSamples = 0, flipSide = 1, lbyCycle = 0}
@@ -359,14 +386,14 @@ local function onAngles(ctx)
         if c.fake:get() then fakeOffset = (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get() end
         if c.shotFlip:get() and ctx.fakewalk then fakeOffset = fakeOffset + s.flipSide * c.shotFlipRange:get() end
         -- A script-placed real sends its fake opposite; otherwise the fake would sit on the head.
-        if override then result.yaw = wrap(override + 180 + fakeOffset) end
-        if not override and fakeOffset ~= 0 then
-            result.yaw = wrap(anchor + fakeOffset)
-            s.fakeSamples = s.fakeSamples + 1
+        if override or fakeOffset ~= 0 then
+            result.yaw = override and wrap(override + 180 + fakeOffset) or wrap(anchor + fakeOffset)
+            s.fakeSamples, s.fakeCommand = s.fakeSamples + 1, ctx.command_number
         end
     else
         -- Standing hold samples once per LBY cycle so the real never drifts onto the decoy between updates.
         local index = (c.lbyHold:get() and ctx.mode == "stand") and s.lbyCycle or s.index
+        s.hidden = override ~= nil and not chosen
         local hiddenStill = override and not chosen and not c.hideJitter:get()
         if not hiddenStill then result.yaw = wrap(anchor + realOffset(ctx, index, index % 2 == 0 and -1 or 1)) end
         if ctx.lag == 0 then s.realSamples = s.realSamples + 1 end
@@ -442,11 +469,9 @@ events.tick:set(function(event)
     if nextChoice ~= chosen then
         chosen = nextChoice
         log("Chaos AA: manual " .. (chosen or "cleared"))
-        if indicator and type(indicator.set_text) == "function" then
-            indicator:set_text(chosen and "CHAOS " .. string.upper(chosen) or "CHAOS")
-        end
     end
     if not alive then reset(); status = "waiting for alive player" end
+    updateFlags(event.command_number, alive and c.enabled:get() and c.flags:get())
 end)
 events.ui:set(function(event)
     sync()
