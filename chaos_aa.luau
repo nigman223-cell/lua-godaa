@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 320: newest manual key overrides, native manual arrows follow script direction")
+print("CHAOS BUILD CHECK 321: moving yaw keeps the widest predicted feet gap")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -43,6 +43,7 @@ for _, entry in ipairs({{"stand", "Standing", 60}, {"walk", "Moving", 35}, {"duc
     profiles[entry[1]] = item
 end
 c.moving = control("real", 2, "switch", "Profiles / Apply while moving", true)
+c.movingGap = control("real", 2, "switch", "Profiles / Widest feet gap while moving", true)
 c.extend = control("fake", 2, "switch", "Extend / Enable", false)
 c.extendMode = control("fake", 2, "combo", "Extend / Mode", {"Static", "Jitter", "Random", "Spin"})
 c.extendRange = control("fake", 2, "slider", "Extend / Amplitude", 0, 180, 30)
@@ -125,6 +126,7 @@ local tips = {
     baseOffset = "Degrees added to the chosen base yaw.",
     profiles = "Use state-specific amplitudes instead of the main amplitude.",
     moving = "Apply Chaos yaw while walking or running.",
+    movingGap = "While moving, test the style yaw, the native twist yaw and both amplitude sides, and keep the one whose predicted real feet sit furthest from the LBY a resolver reads.",
     extend = "Add a second yaw offset to the selected real style.",
     extendMode = "Choose a fixed, alternating, random, or rotating extra offset.",
     extendRange = "Extra offset in degrees; Spin uses this as its step.",
@@ -376,6 +378,17 @@ local function realOffset(ctx, index, side)
     end
     return offset
 end
+local function widestYaw(candidates)
+    local best, bestGap = nil, -1
+    for _, yaw in ipairs(candidates) do
+        local ok, state = pcall(rage.antiaim.predict, yaw)
+        if ok and state then
+            local gap = math.abs(wrap(state.feet_yaw - state.body_yaw))
+            if gap > bestGap then best, bestGap = yaw, gap end
+        end
+    end
+    return best
+end
 local function onAngles(ctx)
     prepare(ctx)
     local previous = parent
@@ -424,7 +437,14 @@ local function onAngles(ctx)
         local index = (c.lbyHold:get() and ctx.mode == "stand") and s.lbyCycle or s.index
         s.hidden = override ~= nil and not chosen
         local hiddenStill = override and not chosen and not c.hideJitter:get()
-        if not hiddenStill then result.yaw = wrap(anchor + realOffset(ctx, index, index % 2 == 0 and -1 or 1)) end
+        if not hiddenStill then
+            local yaw = wrap(anchor + realOffset(ctx, index, index % 2 == 0 and -1 or 1))
+            if ctx.mode == "walk" and not override and c.movingGap:get() then
+                local amount = c.profiles:get() and profiles.walk:get() or c.range:get()
+                yaw = widestYaw({yaw, anchor, wrap(anchor + amount), wrap(anchor - amount)}) or yaw
+            end
+            result.yaw = yaw
+        end
         if ctx.lag == 0 then s.realSamples = s.realSamples + 1 end
     end
     status = string.format("%s cmd=%d cycle=%d lby=%d lag=%d send=%s real=%d fake=%d yaw=%.1f",
