@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 312: script-owned manual, jitter around manual, real jitter on every choked command")
+print("CHAOS BUILD CHECK 313: manual rotated in angles stage, manual changes printed")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -193,9 +193,8 @@ local baseTargets = {
 -- Base yaw sits 180 behind the head, so each direction is the head turn minus 180.
 local manualBase = {back = 0, left = -90, right = 90, forward = 180}
 local function onView(ctx)
-    -- Script manual turns the base itself, so it never borrows or restores the native manual state.
-    if chosen then ctx.result = {yaw = wrap(ctx.camera_yaw + manualBase[chosen])}; return end
-    if parent and parent.ctx.manual_direction > 0 then return end
+    -- Manual is rotated in onAngles against the native base, so the base must stay native here.
+    if chosen or (parent and parent.ctx.manual_direction > 0) then return end
     local resolve = baseTargets[c.baseMode:get()]
     local yaw = resolve and resolve()
     local offset = c.baseOffset:get()
@@ -266,6 +265,9 @@ local function onAngles(ctx)
     if not ok then error(base) end
     if not ctx.angles_allowed or type(base) ~= "table" then return end
     local result = table.clone(base)
+    -- Rotate the whole native angle (breaker and twist included) from its base onto the camera-relative manual.
+    local anchor = chosen and wrap(base.yaw - ctx.base_yaw + ctx.view_yaw + manualBase[chosen]) or base.yaw
+    result.yaw = anchor
     local pitch = c.pitch:get()
     if pitch == 2 then result.pitch = 89 elseif pitch == 3 then result.pitch = 0 elseif pitch == 4 then result.pitch = -89 end
     ctx.result = result
@@ -281,7 +283,7 @@ local function onAngles(ctx)
             s.fakeCycle = s.fakeCycle + 1
         end
         if c.fake:get() then
-            result.yaw = wrap(base.yaw + (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get())
+            result.yaw = wrap(anchor + (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get())
             s.fakeSamples = s.fakeSamples + 1
         end
     else
@@ -299,7 +301,7 @@ local function onAngles(ctx)
             elseif mode == 4 then extra = wrap(s.index * range) end
             offset = offset + extra
         end
-        result.yaw = wrap(base.yaw + offset)
+        result.yaw = wrap(anchor + offset)
         if ctx.lag == 0 then s.realSamples = s.realSamples + 1 end
     end
     ctx.result = result
@@ -373,6 +375,7 @@ events.tick:set(function(event)
     if c.clear:pressed() then nextChoice = nil end
     if nextChoice ~= chosen then
         chosen = nextChoice
+        print("Chaos AA: manual " .. (chosen or "cleared"))
         if indicator and type(indicator.set_text) == "function" then
             indicator:set_text(chosen and "CHAOS " .. string.upper(chosen) or "CHAOS")
         end
