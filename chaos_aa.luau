@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 311: manual clear, back is not manual, fake choke, LBY hide mode, native menu visible")
+print("CHAOS BUILD CHECK 312: script-owned manual, jitter around manual, real jitter on every choked command")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -23,7 +23,7 @@ local function control(page, column, kind, label, ...)
     return assert(group[kind](group, label, ...), "Cannot create " .. label)
 end
 c.enabled = control("real", 1, "switch", "Main / Enable", true)
-c.manualRespect = control("real", 1, "switch", "Main / Preserve manual direction", true)
+c.manualStatic = control("real", 1, "switch", "Main / Static manual yaw", false)
 c.hideNative = control("real", 1, "switch", "Main / Hide native menu", false)
 c.style = control("real", 1, "combo", "Real / Style", {"Jitter", "Random", "Spin", "Native"})
 c.range = control("real", 1, "slider", "Real / Jitter or random amplitude", 0, 180, 60)
@@ -61,7 +61,6 @@ c.lagMax = control("lag", 1, "slider", "Packets / Maximum choke", 1, 14, 6)
 c.fakewalkSync = control("lag", 1, "switch", "Packets / Sync fake walk", false)
 c.manual = control("real", 2, "switch", "Manual / Script keys", false)
 c.manualMode = control("real", 2, "combo", "Manual / Key behavior", {"Toggle", "Hold"})
-c.manualRemember = control("real", 2, "switch", "Manual / Remember direction while moving", true)
 c.lastmoveRepeat = control("real", 2, "switch", "Manual / Repeat last-move side", true)
 local keys = {}
 for _, direction in ipairs({"back", "left", "right", "forward"}) do
@@ -79,7 +78,6 @@ c.twistRange:show_if(c.twist, 2)
 for _, item in ipairs({c.extendMode, c.extendRange}) do item:show_if(c.extend, 2) end
 for _, item in ipairs({c.lagMin, c.lagMax, c.fakewalkSync}) do item:show_if(c.packet, 2) end
 c.manualMode:show_if(c.manual, 2)
-c.manualRemember:show_if(c.manual, 2)
 for _, item in ipairs(keys) do item.control:show_if(c.manual, 2) end
 c.clear:show_if(c.manual, 2)
 local function tooltip(item, text)
@@ -87,7 +85,7 @@ local function tooltip(item, text)
 end
 local tips = {
     enabled = "Enable Chaos. Requires native AA enabled.",
-    manualRespect = "Keep left, right and forward manual yaw; back still gets Chaos yaw. Pitch and timed LBY flicks still apply.",
+    manualStatic = "Off: Chaos jitter runs around the manual direction. On: a left, right or forward manual holds a static yaw.",
     hideNative = "Hide the built-in Anti-Aim menu. Off keeps every native feature reachable.",
     style = "Jitter alternates; Random samples; Spin rotates; Native adds no style offset.",
     range = "Yaw offset in degrees. 60 gives jitter offsets of -60 and +60.",
@@ -117,11 +115,10 @@ local tips = {
     lagMin = "Lowest requested choke count per cycle, limited by the host.",
     lagMax = "Highest requested choke count per cycle, limited by the host.",
     fakewalkSync = "Run the Chaos choke cadence during fake walk and ask fake walk to follow it.",
-    manual = "Enable the script's manual-direction keys.",
-    manualMode = "Toggle: press again to clear. Hold: release to clear.",
+    manual = "Enable the script's manual-direction keys. Unbind the native manual keys to avoid both reacting.",
+    manualMode = "Toggle: press a direction again to clear it. Hold: release to clear.",
     lastmoveRepeat = "Whether the native last-move side repeats. Off borrows the native setting until unload.",
-    manualRemember = "Remember the last manual key pressed while moving for native last-move flicks. Clear resets it.",
-    clear = "Clear the script's manual direction back to default (back).",
+    clear = "Clear the script's manual direction; base yaw returns to normal.",
     report = "Print angle state, cycle counters, and hook owners to the console.",
     indicator = "Show CHAOS in the HUD indicator list while alive.",
     shotLog = "Print each enemy shot at you with the anti-aim state and desync.",
@@ -145,8 +142,7 @@ local function native(ctx)
     return ctx:original()
 end
 local s, parent = {}, nil
-local alive, attached, chosen, ownsManual = false, false, nil, false
-local rememberedManual, pendingManualPress, appliedLastmove = nil, nil, nil
+local alive, attached, chosen = false, false, nil
 local movementState = nil
 local lastmoveRepeatState = nil
 local nativeMenuHidden = false
@@ -160,23 +156,11 @@ local status = "waiting for alive player"
 local indicator = type(indicators) == "table" and type(indicators.add) == "function"
     and indicators.add("chaos_aa3", "CHAOS") or nil
 local function reset()
-    rememberedManual = nil
     s = {cycle = 0, fakeCycle = 0, command = nil, session = nil, previousLag = nil,
         breakerCount = 0, breakerKey = nil, realSamples = 0, fakeSamples = 0}
     parent = nil
 end
 reset()
-local function setManual(direction)
-    -- Clearing keeps ownership on back: set_manual(nil) would restore the old native direction.
-    if rage.antiaim.set_manual(direction or "back", rememberedManual) then
-        chosen, ownsManual, appliedLastmove = direction, true, rememberedManual
-    end
-end
-local function releaseManual()
-    if ownsManual then rage.antiaim.set_manual(nil) end
-    ownsManual, chosen = false, nil
-    rememberedManual, pendingManualPress, appliedLastmove = nil, nil, nil
-end
 local function movement(enabled)
     local delay, crank = enabled and c.delay:get(), enabled and c.crank:get()
     local key = tostring(delay) .. ":" .. tostring(crank)
@@ -206,8 +190,12 @@ local baseTargets = {
         return wall and wrap(wall + 180)
     end,
 }
+-- Base yaw sits 180 behind the head, so each direction is the head turn minus 180.
+local manualBase = {back = 0, left = -90, right = 90, forward = 180}
 local function onView(ctx)
-    if parent and parent.manual then return end
+    -- Script manual turns the base itself, so it never borrows or restores the native manual state.
+    if chosen then ctx.result = {yaw = wrap(ctx.camera_yaw + manualBase[chosen])}; return end
+    if parent and parent.ctx.manual_direction > 0 then return end
     local resolve = baseTargets[c.baseMode:get()]
     local yaw = resolve and resolve()
     local offset = c.baseOffset:get()
@@ -269,19 +257,8 @@ local function onTwist(ctx)
 end
 local function onAngles(ctx)
     prepare(ctx)
-    -- tick has keys but no speed; this command's snapshot determines movement.
-    if ownsManual then
-        if not c.manualRemember:get() then rememberedManual = nil
-        elseif pendingManualPress and ctx.grounded and ctx.speed > 0.1 and not ctx.fakewalk then
-            rememberedManual = pendingManualPress
-        end
-        if appliedLastmove ~= rememberedManual then
-            setManual(chosen)
-        end
-    end
-    pendingManualPress = nil
     local previous = parent
-    parent = {ctx = ctx, manual = c.manualRespect:get() and ctx.manual_direction > 0}
+    parent = {ctx = ctx, manual = c.manualStatic:get() and (chosen ~= nil or ctx.manual_direction > 0)}
     local frame = parent
     -- Restore nesting state even if native dispatch raises an error.
     local ok, base = pcall(native, ctx)
@@ -297,6 +274,7 @@ local function onAngles(ctx)
     if frame.manual or (ctx.mode == "walk" and not c.moving:get())
         or ctx.body_update or ctx.body_preupdate then return end
     local send = ctx.final_packet
+    if s.sendCommand == ctx.command_number then send = s.send end
     if send and ctx.lag > 0 then
         if s.lastFake ~= ctx.command_number then
             s.lastFake = ctx.command_number
@@ -306,7 +284,8 @@ local function onAngles(ctx)
             result.yaw = wrap(base.yaw + (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get())
             s.fakeSamples = s.fakeSamples + 1
         end
-    elseif ctx.lag == 0 then
+    else
+        -- Every choked or unfaked command carries the cycle's real sample, not only the first one.
         local amount = c.profiles:get() and profiles[ctx.mode]:get() or c.range:get()
         local style, offset = c.style:get(), 0
         if style == 1 then offset = s.side * amount
@@ -321,13 +300,13 @@ local function onAngles(ctx)
             offset = offset + extra
         end
         result.yaw = wrap(base.yaw + offset)
-        s.realSamples = s.realSamples + 1
+        if ctx.lag == 0 then s.realSamples = s.realSamples + 1 end
     end
     ctx.result = result
     status = string.format("%s cmd=%d cycle=%d side=%d lag=%d send=%s real=%d fake=%d yaw=%.1f",
         ctx.mode, ctx.command_number, s.cycle, s.side, ctx.lag, tostring(send), s.realSamples, s.fakeSamples, result.yaw)
 end
-local function onPacket(ctx)
+local function decidePacket(ctx)
     prepare(ctx)
     local base = native(ctx)
     local syncWalk = ctx.fakewalk and c.fakewalkSync:get()
@@ -350,6 +329,12 @@ local function onPacket(ctx)
     result.fakewalk_sync = syncWalk
     ctx.result = result
 end
+local function onPacket(ctx)
+    decidePacket(ctx)
+    -- Angles may run after this; let them read the real send decision instead of guessing.
+    local decided = native(ctx)
+    if type(decided) == "table" then s.sendCommand, s.send = ctx.command_number, decided.send end
+end
 local callbacks = {["antiaim.angles"] = onAngles, ["antiaim.packet"] = onPacket,
     ["antiaim.breaker"] = onBreaker, ["antiaim.twist"] = onTwist,
     ["antiaim.view"] = onView, ["antiaim.enemy_shot"] = onEnemyShot}
@@ -363,7 +348,6 @@ local function sync()
         end
         attached = active
     end
-    if not active or not c.manual:get() then releaseManual() end
     movement(active and alive and c.moving:get())
     lastmoveRepeat(active)
     if indicator and type(indicator.set_enabled) == "function" then
@@ -373,38 +357,37 @@ end
 events.tick:set(function(event)
     alive = event.in_game and event.alive
     sync()
-    pendingManualPress = nil
-    local nextChoice = chosen
     local useKeys = alive and c.enabled:get() and c.manual:get()
-    if c.manualMode:get() == 2 or not useKeys then nextChoice = nil end
+    local holding = c.manualMode:get() == 2
+    local nextChoice = useKeys and not holding and chosen or nil
     for _, item in ipairs(keys) do
         local pressed = item.control:pressed()
         if useKeys then
-            if pressed then pendingManualPress = item.name end
-            if c.manualMode:get() == 2 then
+            if holding then
                 if item.control:active() then nextChoice = item.name end
             elseif pressed then
-                if nextChoice == item.name then nextChoice = nil else nextChoice = item.name end
+                nextChoice = nextChoice ~= item.name and item.name or nil
             end
         end
     end
     if c.clear:pressed() then nextChoice = nil end
-    if nextChoice ~= chosen then setManual(nextChoice) end
+    if nextChoice ~= chosen then
+        chosen = nextChoice
+        if indicator and type(indicator.set_text) == "function" then
+            indicator:set_text(chosen and "CHAOS " .. string.upper(chosen) or "CHAOS")
+        end
+    end
     if not alive then reset(); status = "waiting for alive player" end
 end)
 events.ui:set(function(event)
     sync()
     if event.kind == "click" and event.handle == c.report.__handle then
         print("Chaos AA 3.0: " .. status)
-        print("manual:", chosen or "none", "last moving direction:", rememberedManual or "none")
+        print("manual:", chosen or "none")
         if type(hooks.owner) == "function" then
             for stage in pairs(callbacks) do print(stage, "last owner:", hooks.owner(stage)) end
         end
     end
-end)
-events.shutdown:set(function()
-    releaseManual()
-    -- The host restores this script's built-in menu hides during release.
 end)
 sync()
 print("Chaos AA 3.0: loaded. Controls on native pages, or Anti-Aim > script on older clients. Enable native AA; unload other AA scripts.")
