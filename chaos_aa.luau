@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 309: Extend on Fake page")
+print("CHAOS BUILD CHECK 310: native base yaw, last-move repeat, fake walk sync, enemy shot log")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -30,6 +30,8 @@ c.hold = control("real", 1, "slider", "Real / Cycles per sample", 1, 8, 1)
 c.spin = control("real", 1, "slider", "Real / Spin degrees per sample", 1, 180, 35)
 c.pitch = control("real", 1, "combo", "Real / Pitch", {"Native", "Down", "Level", "Up"})
 c.seed = control("real", 1, "slider", "Main / Random seed", 1, 10000, 1337)
+c.baseMode = control("real", 1, "combo", "Base / Yaw target", {"Native", "At targets (FOV)", "At targets (distance)", "Freestanding", "Edge"})
+c.baseOffset = control("real", 1, "slider", "Base / Yaw offset", -180, 180, 0)
 c.profiles = control("real", 2, "switch", "Profiles / Separate movement amplitudes", false)
 local profiles = {}
 for _, entry in ipairs({{"stand", "Standing", 60}, {"walk", "Moving", 35}, {"duck", "Crouching", 45}, {"air", "Air", 75}}) do
@@ -54,9 +56,11 @@ c.crank = control("twist", 2, "switch", "Twist / Crank movement", false)
 c.packet = control("lag", 1, "switch", "Packets / Override native cadence", false)
 c.lagMin = control("lag", 1, "slider", "Packets / Minimum choke", 1, 14, 2)
 c.lagMax = control("lag", 1, "slider", "Packets / Maximum choke", 1, 14, 6)
+c.fakewalkSync = control("lag", 1, "switch", "Packets / Sync fake walk", false)
 c.manual = control("real", 2, "switch", "Manual / Script keys", false)
 c.manualMode = control("real", 2, "combo", "Manual / Key behavior", {"Toggle", "Hold"})
 c.manualRemember = control("real", 2, "switch", "Manual / Remember direction while moving", true)
+c.lastmoveRepeat = control("real", 2, "switch", "Manual / Repeat last-move side", true)
 local keys = {}
 for _, direction in ipairs({"back", "left", "right", "forward"}) do
     keys[#keys + 1] = {name = direction, control = control("real", 2, "hotkey", "Manual / " .. direction)}
@@ -64,13 +68,14 @@ end
 c.clear = control("real", 2, "hotkey", "Manual / Clear")
 c.report = control("lag", 2, "button", "Diagnostics / Print status")
 c.indicator = control("lag", 2, "switch", "Diagnostics / Indicator", true)
+c.shotLog = control("lag", 2, "switch", "Diagnostics / Log enemy shots", false)
 c.spin:show_if(c.style, 3)
 c.fakeRange:show_if(c.fake, 2)
 c.breakerRange:show_if(c.breaker, 2)
 c.flickRange:show_if(c.flick, 2)
 c.twistRange:show_if(c.twist, 2)
 for _, item in ipairs({c.extendMode, c.extendRange}) do item:show_if(c.extend, 2) end
-for _, item in ipairs({c.lagMin, c.lagMax}) do item:show_if(c.packet, 2) end
+for _, item in ipairs({c.lagMin, c.lagMax, c.fakewalkSync}) do item:show_if(c.packet, 2) end
 c.manualMode:show_if(c.manual, 2)
 c.manualRemember:show_if(c.manual, 2)
 for _, item in ipairs(keys) do item.control:show_if(c.manual, 2) end
@@ -87,6 +92,8 @@ local tips = {
     spin = "Degrees rotated per real-angle sample.",
     pitch = "Choose native pitch, down (+89), level (0), or up (-89).",
     seed = "Change the repeatable random sequence.",
+    baseMode = "Direction every angle builds on. Freestanding hides the head from the closest enemy; Edge puts it into a nearby wall. Falls back to native when nothing is found.",
+    baseOffset = "Degrees added to the chosen base yaw.",
     profiles = "Use state-specific amplitudes instead of the main amplitude.",
     moving = "Apply Chaos yaw while walking or running.",
     extend = "Add a second yaw offset to the selected real style.",
@@ -105,12 +112,15 @@ local tips = {
     packet = "Choose choke lengths between the limits. Native safety still applies.",
     lagMin = "Lowest requested choke count per cycle, limited by the host.",
     lagMax = "Highest requested choke count per cycle, limited by the host.",
+    fakewalkSync = "Run the Chaos choke cadence during fake walk and ask fake walk to follow it.",
     manual = "Enable the script's manual-direction keys.",
     manualMode = "Toggle: press again to clear. Hold: release to clear.",
+    lastmoveRepeat = "Whether the native last-move side repeats. Off borrows the native setting until unload.",
     manualRemember = "Remember the last manual key pressed while moving for native last-move flicks. Clear resets it.",
     clear = "Clear the script's selected manual direction.",
     report = "Print angle state, cycle counters, and hook owners to the console.",
     indicator = "Show CHAOS in the HUD indicator list while alive.",
+    shotLog = "Print each enemy shot at you with the anti-aim state and desync.",
 }
 for name, text in pairs(tips) do tooltip(c[name], text) end
 for state, item in pairs(profiles) do
@@ -134,6 +144,7 @@ local s, parent = {}, nil
 local alive, attached, chosen, ownsManual = false, false, nil, false
 local rememberedManual, pendingManualPress, appliedLastmove = nil, nil, nil
 local movementState = nil
+local lastmoveRepeatState = nil
 local nativeMenuHidden = false
 local function syncNativeMenu(active)
     if active == nativeMenuHidden then return end
@@ -164,6 +175,41 @@ local function movement(enabled)
         if delay or crank or movementState ~= nil then rage.antiaim.set_twist_movement(delay, crank) end
         if delay or crank or movementState ~= nil then movementState = key end
     end
+end
+local function lastmoveRepeat(active)
+    local wanted = not active or c.lastmoveRepeat:get()
+    if wanted == lastmoveRepeatState then return end
+    -- Same borrowing rule as movement: leave native untouched until asked.
+    if wanted and lastmoveRepeatState == nil then return end
+    rage.antiaim.set_lastmove_repeat(wanted)
+    lastmoveRepeatState = wanted
+end
+local baseTargets = {
+    [2] = function() return rage.antiaim.get_target("fov") end,
+    [3] = function() return rage.antiaim.get_target("distance") end,
+    [4] = function()
+        local cover = rage.antiaim.get_freestanding("fov")
+        return cover and wrap(cover + 180)
+    end,
+    [5] = function()
+        local wall = rage.antiaim.edge()
+        return wall and wrap(wall + 180)
+    end,
+}
+local function onView(ctx)
+    if parent and parent.manual then return end
+    local resolve = baseTargets[c.baseMode:get()]
+    local yaw = resolve and resolve()
+    local offset = c.baseOffset:get()
+    if yaw == nil and offset == 0 then return end
+    ctx.result = {yaw = wrap((yaw or ctx.native_yaw) + offset)}
+end
+local hitgroups = {[0] = "generic", "head", "chest", "stomach", "left arm", "right arm", "left leg", "right leg", "neck", [10] = "gear"}
+local function onEnemyShot(ctx)
+    if not c.shotLog:get() then return end
+    print(string.format("Chaos AA: %s %s (%s, %d dmg, %.0fu) state=%s desync=%.1f real=%.1f fake=%.1f speed=%.0f",
+        ctx.name, ctx.hit and "hit" or "missed", hitgroups[ctx.hitgroup] or tostring(ctx.hitgroup), ctx.damage,
+        ctx.distance, ctx.state, ctx.desync, ctx.real_yaw, ctx.fake_yaw, ctx.speed))
 end
 local function prepare(ctx)
     if s.session ~= ctx.session_id then reset(); s.session = ctx.session_id end
@@ -268,17 +314,20 @@ end
 local function onPacket(ctx)
     prepare(ctx)
     local base = native(ctx)
-    if not c.packet:get() or not ctx.angles_allowed or ctx.fakewalk or ctx.shot or ctx.old_shot
+    local syncWalk = ctx.fakewalk and c.fakewalkSync:get()
+    if not c.packet:get() or not ctx.angles_allowed or (ctx.fakewalk and not syncWalk) or ctx.shot or ctx.old_shot
         or ctx.fresh_jump or ctx.landing or ctx.body_update or ctx.body_preupdate then return end
     -- Flush before the native deadline to allow a fresh animated first command.
     local deadline = ctx.body_update_time - ctx.time
     if ctx.mode == "stand" and deadline >= 0 and deadline <= ctx.tick_interval * 2 then return end
     local result = table.clone(base)
     result.send = ctx.lag >= math.min(s.lagTarget, ctx.max_lag)
+    result.fakewalk_sync = syncWalk
     ctx.result = result
 end
 local callbacks = {["antiaim.angles"] = onAngles, ["antiaim.packet"] = onPacket,
-    ["antiaim.breaker"] = onBreaker, ["antiaim.twist"] = onTwist}
+    ["antiaim.breaker"] = onBreaker, ["antiaim.twist"] = onTwist,
+    ["antiaim.view"] = onView, ["antiaim.enemy_shot"] = onEnemyShot}
 local function sync()
     local active = c.enabled:get()
     syncNativeMenu(active)
@@ -291,6 +340,7 @@ local function sync()
     end
     if not active or not c.manual:get() or not alive then releaseManual() end
     movement(active and alive and c.moving:get())
+    lastmoveRepeat(active)
     if indicator and type(indicator.set_enabled) == "function" then
         indicator:set_enabled(active and alive and c.indicator:get())
     end
