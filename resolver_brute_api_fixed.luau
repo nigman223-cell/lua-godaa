@@ -39,17 +39,34 @@ local hooks_api = hooks
 
 local DEBUG_PREFIX = "[SAR] "
 local CHAT_LIMIT = 240
+local CHAT_QUEUE_MAX = 16
+local CHAT_LINES_PER_TICK = 1
+local chat_queue = {}
+
+local function sanitize(text)
+    return (string.gsub(text, "[^%w %.,:;%-_%+%(%)%[%]#/]", "?"))
+end
 
 local function debug_log(message)
     local mode = debug_output:get()
     if mode == 1 then return end
-    local line = DEBUG_PREFIX .. message
-    if mode == 2 or mode == 4 then
-        local ok, printed = pcall(client.chat_print, string.sub(line, 1, CHAT_LIMIT))
-        if (not ok or not printed) and mode == 2 then print(line) end
+    local line = DEBUG_PREFIX .. sanitize(message)
+    if (mode == 2 or mode == 4) and #chat_queue < CHAT_QUEUE_MAX then
+        chat_queue[#chat_queue + 1] = string.sub(line, 1, CHAT_LIMIT)
     end
     if mode == 3 or mode == 4 then
         print(line)
+    end
+end
+
+local function flush_chat(event)
+    if #chat_queue == 0 then return end
+    if not event.in_game then
+        chat_queue = {}
+        return
+    end
+    for _ = 1, math.min(CHAT_LINES_PER_TICK, #chat_queue) do
+        pcall(client.chat_print, table.remove(chat_queue, 1))
     end
 end
 
@@ -224,6 +241,8 @@ else
         .. ". The documented resolver stages cannot run in this runtime.")
 end
 
+events.tick:set(flush_chat)
+
 events.shutdown:set(function(event)
     if hooks_available then
         for _, stage in ipairs(resolve_stages) do
@@ -234,6 +253,7 @@ events.shutdown:set(function(event)
         end
     end
     states = {}
+    chat_queue = {}
 end)
 
 if hooks_available and #resolve_stages == 0 then
