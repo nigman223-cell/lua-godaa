@@ -30,11 +30,22 @@ local pattern_control = per_weapon(group:combo("Brute pattern", {
     "Wide",
     "Classic"
 }))
+local damage_overrides = group:switch("Min damage overrides", true)
+local low_hp = per_weapon(group:slider("Low HP below (0 = off)", 0, 100, 30))
+local low_resolve = group:combo("Low resolve trigger", {
+    "Off",
+    "Very low",
+    "Low or worse"
+})
+local low_resolve_damage = per_weapon(group:slider("Low resolve damage", 1, 100, 15))
+low_hp:show_if(damage_overrides, 2)
+low_resolve:show_if(damage_overrides, 2)
+low_resolve_damage:show_if(damage_overrides, 2)
 local debug_console = group:switch("Debug console logs", false)
 
-local resolve_stages = {}
-local feedback_stages = {}
+local registered = {}
 local states = {}
+local last_override = nil
 local hooks_api = hooks
 
 local DEBUG_PREFIX = "[SAR] "
@@ -195,12 +206,54 @@ local function on_feedback(ctx)
         tostring(ctx.hypothesis), s.misses))
 end
 
-local function register_stage(stage, callback, bucket)
+local function focus_target(targets)
+    local best
+    for _, target in pairs(targets) do
+        if not best or target.fov < best.fov then best = target end
+    end
+    return best
+end
+
+local function override_damage(target)
+    local damage
+    local threshold = low_hp:get()
+    if threshold > 0 and target.health <= threshold then
+        damage = target.health
+    end
+    -- Combo values: 2 = very low (confidence 0), 3 = low or worse (confidence 0 or 1).
+    local trigger = low_resolve:get()
+    if trigger > 1 and target.resolver_confidence <= trigger - 2 then
+        damage = math.min(damage or 200, low_resolve_damage:get())
+    end
+    return damage
+end
+
+local function on_target(ctx)
+    if not damage_overrides:get() or type(ctx) ~= "table" or type(ctx.targets) ~= "table" then return end
+    local target = focus_target(ctx.targets)
+    local damage = target and override_damage(target)
+    if not damage or damage >= ctx.damage then
+        last_override = nil
+        return
+    end
+    ctx.damage = math.max(1, damage)
+    ctx:original()
+
+    local key = tostring(target.index) .. ":" .. tostring(ctx.damage)
+    if key ~= last_override then
+        last_override = key
+        debug_log(string.format("#%s min damage %s (hp %s, confidence %s)",
+            tostring(target.index), tostring(ctx.damage), tostring(target.health),
+            tostring(target.resolver_confidence)))
+    end
+end
+
+local function register_stage(stage, callback)
     local ok, err = pcall(function()
         hooks_api.set(stage, callback)
     end)
     if ok then
-        bucket[#bucket + 1] = stage
+        registered[stage] = true
         print("Safe Angle Resolver: registered " .. stage)
     else
         warn("Safe Angle Resolver: failed to register " .. stage .. ": " .. tostring(err))
@@ -213,8 +266,9 @@ local hooks_available = type(hooks_api) == "table"
 
 if hooks_available then
     -- These names are explicitly documented by LUAU_API.md.
-    register_stage("resolver.resolve", on_resolve, resolve_stages)
-    register_stage("resolver.feedback", on_feedback, feedback_stages)
+    register_stage("resolver.resolve", on_resolve)
+    register_stage("resolver.feedback", on_feedback)
+    register_stage("ragebot.target", on_target)
 else
     warn("Safe Angle Resolver: UI loaded, but hooks API is " .. type(hooks_api)
         .. ". The documented resolver stages cannot run in this runtime.")
@@ -222,19 +276,16 @@ end
 
 events.shutdown:set(function(event)
     if hooks_available then
-        for _, stage in ipairs(resolve_stages) do
-            pcall(function() hooks_api.unset(stage) end)
-        end
-        for _, stage in ipairs(feedback_stages) do
+        for stage in pairs(registered) do
             pcall(function() hooks_api.unset(stage) end)
         end
     end
     states = {}
 end)
 
-if hooks_available and #resolve_stages == 0 then
+if hooks_available and not registered["resolver.resolve"] then
     warn("Safe Angle Resolver: resolver.resolve did not register; see the error above.")
 end
-if hooks_available and #feedback_stages == 0 then
+if hooks_available and not registered["resolver.feedback"] then
     warn("Safe Angle Resolver: resolver.feedback did not register; brute learning cannot advance.")
 end
