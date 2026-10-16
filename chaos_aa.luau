@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 317: LBY flick follows moved real, real held between standing LBY updates")
+print("CHAOS BUILD CHECK 318: Real / Hide head (freestand or away), fake sent opposite a script-placed real")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -30,6 +30,8 @@ c.range = control("real", 1, "slider", "Real / Jitter or random amplitude", 0, 1
 c.hold = control("real", 1, "slider", "Real / Cycles per sample", 1, 8, 1)
 c.spin = control("real", 1, "slider", "Real / Spin degrees per sample", 1, 180, 35)
 c.pitch = control("real", 1, "combo", "Real / Pitch", {"Native", "Down", "Level", "Up"})
+c.hideReal = control("real", 1, "combo", "Real / Hide head", {"Off", "Freestand", "Away from enemy"})
+c.hideJitter = control("real", 1, "switch", "Real / Jitter while hidden", false)
 c.seed = control("real", 1, "slider", "Main / Random seed", 1, 10000, 1337)
 c.baseMode = control("real", 1, "combo", "Base / Yaw target", {"Native", "At targets (FOV)", "At targets (distance)", "Freestanding", "Edge"})
 c.baseOffset = control("real", 1, "slider", "Base / Yaw offset", -180, 180, 0)
@@ -113,6 +115,8 @@ local tips = {
     hold = "Choke cycles to hold each real-angle sample. Higher means slower changes.",
     spin = "Degrees rotated per real-angle sample.",
     pitch = "Choose native pitch, down (+89), level (0), or up (-89).",
+    hideReal = "Place the real head itself: Freestand turns it into cover from the closest enemy, Away points it straight away from them. The fake is sent opposite. Manual keys take priority.",
+    hideJitter = "Let the real style jitter or spin around the hidden head instead of holding it still.",
     seed = "Change the repeatable random sequence.",
     baseMode = "Direction every angle builds on. Freestanding hides the head from the closest enemy; Edge puts it into a nearby wall. Falls back to native when nothing is found.",
     baseOffset = "Degrees added to the chosen base yaw.",
@@ -217,6 +221,23 @@ local baseTargets = {
     end,
 }
 local manualHead = {back = 180, left = 90, right = -90, forward = 0}
+local hideTargets = {
+    [2] = function() return rage.antiaim.get_freestanding("fov") end,
+    [3] = function()
+        local enemy = rage.antiaim.get_target("fov")
+        return enemy and wrap(enemy + 180)
+    end,
+}
+local function hiddenYaw(ctx)
+    local resolve = hideTargets[c.hideReal:get()]
+    if not resolve then return nil end
+    -- Standing keeps the head where the last LBY update left it, matching the decoy placed for it.
+    local holding = ctx.mode == "stand" and c.lbyHold:get()
+    if holding and s.hideCycle == s.lbyCycle then return s.hideYaw end
+    local yaw = resolve()
+    if holding and yaw then s.hideCycle, s.hideYaw = s.lbyCycle, yaw end
+    return yaw
+end
 local function onView(ctx)
     -- Manual is rotated in onAngles against the native base, so the base must stay native here.
     if chosen or (parent and parent.ctx.manual_direction > 0) then return end
@@ -318,10 +339,11 @@ local function onAngles(ctx)
     s.inFlick, s.fakewalking = flick, ctx.fakewalk
     if not flick and not faking then s.nativeReal = base.yaw end
     -- Moving the real must carry the native flick along, or the LBY decoy lands on the head.
+    local override = chosen and wrap(ctx.view_yaw + manualHead[chosen]) or hiddenYaw(ctx)
     local anchor = base.yaw
-    if chosen then
+    if override then
         local flickDelta = flick and wrap(base.yaw - (s.nativeReal or base.yaw)) or 0
-        anchor = wrap(ctx.view_yaw + manualHead[chosen] + flickDelta)
+        anchor = wrap(override + flickDelta)
     end
     result.yaw = anchor
     local pitch = c.pitch:get()
@@ -336,14 +358,17 @@ local function onAngles(ctx)
         local fakeOffset = 0
         if c.fake:get() then fakeOffset = (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get() end
         if c.shotFlip:get() and ctx.fakewalk then fakeOffset = fakeOffset + s.flipSide * c.shotFlipRange:get() end
-        if fakeOffset ~= 0 then
+        -- A script-placed real sends its fake opposite; otherwise the fake would sit on the head.
+        if override then result.yaw = wrap(override + 180 + fakeOffset) end
+        if not override and fakeOffset ~= 0 then
             result.yaw = wrap(anchor + fakeOffset)
             s.fakeSamples = s.fakeSamples + 1
         end
     else
         -- Standing hold samples once per LBY cycle so the real never drifts onto the decoy between updates.
         local index = (c.lbyHold:get() and ctx.mode == "stand") and s.lbyCycle or s.index
-        result.yaw = wrap(anchor + realOffset(ctx, index, index % 2 == 0 and -1 or 1))
+        local hiddenStill = override and not chosen and not c.hideJitter:get()
+        if not hiddenStill then result.yaw = wrap(anchor + realOffset(ctx, index, index % 2 == 0 and -1 or 1)) end
         if ctx.lag == 0 then s.realSamples = s.realSamples + 1 end
     end
     status = string.format("%s cmd=%d cycle=%d lby=%d lag=%d send=%s real=%d fake=%d yaw=%.1f",
