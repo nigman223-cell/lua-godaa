@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 319: anti-aim flags in the HUD indicator list")
+print("CHAOS BUILD CHECK 320: newest manual key overrides, native manual arrows follow script direction")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -67,6 +67,7 @@ c.fakewalkSync = control("lag", 1, "switch", "Packets / Sync fake walk", false)
 c.manual = control("real", 2, "switch", "Manual / Script keys", false)
 c.manualMode = control("real", 2, "combo", "Manual / Key behavior", {"Toggle", "Hold"})
 c.lastmoveRepeat = control("real", 2, "switch", "Manual / Repeat last-move side", true)
+c.arrows = control("real", 2, "switch", "Manual / Arrows", true)
 local keys = {}
 for _, direction in ipairs({"back", "left", "right", "forward"}) do
     keys[#keys + 1] = {name = direction, control = control("real", 2, "hotkey", "Direction / " .. direction)}
@@ -102,6 +103,7 @@ c.twistRange:show_if(c.twist, 2)
 for _, item in ipairs({c.extendMode, c.extendRange}) do item:show_if(c.extend, 2) end
 for _, item in ipairs({c.lagMin, c.lagMax, c.fakewalkSync}) do item:show_if(c.packet, 2) end
 c.manualMode:show_if(c.manual, 2)
+c.arrows:show_if(c.manual, 2)
 for _, item in ipairs(keys) do item.control:show_if(c.manual, 2) end
 c.clear:show_if(c.manual, 2)
 local function tooltip(item, text)
@@ -145,7 +147,8 @@ local tips = {
     lagMax = "Highest requested choke count per cycle, limited by the host.",
     fakewalkSync = "Run the Chaos choke cadence during fake walk and ask fake walk to follow it.",
     manual = "Enable the script's manual-direction keys. Unbind the native manual keys to avoid both reacting.",
-    manualMode = "Toggle: press a direction again to clear it. Hold: release to clear.",
+    manualMode = "Toggle: press a direction again to clear it. Hold: release to clear. The newest key pressed always overrides the current direction.",
+    arrows = "Point the native manual arrows and keybind list at the script's manual direction. Enable the native manual arrows indicator to see them.",
     lastmoveRepeat = "Whether the native last-move side repeats. Off borrows the native setting until unload.",
     clear = "Clear the script's manual direction; base yaw returns to normal.",
     report = "Print angle state, cycle counters, and hook owners to the console.",
@@ -177,6 +180,7 @@ local s, parent = {}, nil
 local alive, attached, chosen = false, false, nil
 local movementState = nil
 local lastmoveRepeatState = nil
+local arrowState = nil
 local nativeMenuHidden = false
 local function syncNativeMenu(active)
     if active == nativeMenuHidden then return end
@@ -226,6 +230,31 @@ local function movement(enabled)
         if delay or crank or movementState ~= nil then rage.antiaim.set_twist_movement(delay, crank) end
         if delay or crank or movementState ~= nil then movementState = key end
     end
+end
+local function syncArrows()
+    local wanted = c.arrows:get() and chosen or nil
+    if wanted == arrowState then return end
+    -- Borrowing the native manual drives its arrows; clearing hands it back.
+    if pcall(rage.antiaim.set_manual, wanted) then arrowState = wanted end
+end
+local function manualChoice(useKeys)
+    local holding = c.manualMode:get() == 2
+    local nextChoice, held = useKeys and chosen or nil, {}
+    for _, item in ipairs(keys) do
+        local pressed = item.control:pressed()
+        held[item.name] = item.control:active()
+        if useKeys and pressed then
+            nextChoice = (holding or nextChoice ~= item.name) and item.name or nil
+        end
+    end
+    -- Releasing the newest held key falls back to another key still held.
+    if holding and nextChoice and not held[nextChoice] then
+        nextChoice = nil
+        for _, item in ipairs(keys) do
+            if held[item.name] then nextChoice = item.name end
+        end
+    end
+    return nextChoice
 end
 local function lastmoveRepeat(active)
     local wanted = not active or c.lastmoveRepeat:get()
@@ -452,24 +481,13 @@ end
 events.tick:set(function(event)
     alive = event.in_game and event.alive
     sync()
-    local useKeys = alive and c.enabled:get() and c.manual:get()
-    local holding = c.manualMode:get() == 2
-    local nextChoice = useKeys and not holding and chosen or nil
-    for _, item in ipairs(keys) do
-        local pressed = item.control:pressed()
-        if useKeys then
-            if holding then
-                if item.control:active() then nextChoice = item.name end
-            elseif pressed then
-                nextChoice = nextChoice ~= item.name and item.name or nil
-            end
-        end
-    end
+    local nextChoice = manualChoice(alive and c.enabled:get() and c.manual:get())
     if c.clear:pressed() then nextChoice = nil end
     if nextChoice ~= chosen then
         chosen = nextChoice
         log("Chaos AA: manual " .. (chosen or "cleared"))
     end
+    syncArrows()
     if not alive then reset(); status = "waiting for alive player" end
     updateFlags(event.command_number, alive and c.enabled:get() and c.flags:get())
 end)
