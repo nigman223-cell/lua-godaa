@@ -9,22 +9,27 @@ if not group then
     return
 end
 
+local function per_weapon(control)
+    pcall(function() control:per_weapon() end)
+    return control
+end
+
 local enabled = group:switch("Enable resolver", true)
 local safe_first = group:switch("Safe angle first", true)
 local brute = group:switch("Auto brute counter", true)
 local reset_on_hit = group:switch("Reset brute on hit", true)
-local brute_steps = group:slider("Brute steps", 1, 7, 5)
-local start_mode = group:combo("Initial angle", {
+local brute_steps = per_weapon(group:slider("Brute steps", 1, 7, 5))
+local start_mode = per_weapon(group:combo("Initial angle", {
     "Body yaw",
     "Freestand if valid",
     "Away yaw",
     "Eye yaw"
-})
-local pattern_control = group:combo("Brute pattern", {
+}))
+local pattern_control = per_weapon(group:combo("Brute pattern", {
     "Balanced",
     "Wide",
     "Classic"
-})
+}))
 local debug_console = group:switch("Debug console logs", false)
 
 local resolve_stages = {}
