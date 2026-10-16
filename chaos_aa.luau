@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 310: native base yaw, last-move repeat, fake walk sync, enemy shot log")
+print("CHAOS BUILD CHECK 311: manual clear, back is not manual, fake choke, LBY hide mode, native menu visible")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -24,6 +24,7 @@ local function control(page, column, kind, label, ...)
 end
 c.enabled = control("real", 1, "switch", "Main / Enable", true)
 c.manualRespect = control("real", 1, "switch", "Main / Preserve manual direction", true)
+c.hideNative = control("real", 1, "switch", "Main / Hide native menu", false)
 c.style = control("real", 1, "combo", "Real / Style", {"Jitter", "Random", "Spin", "Native"})
 c.range = control("real", 1, "slider", "Real / Jitter or random amplitude", 0, 180, 60)
 c.hold = control("real", 1, "slider", "Real / Cycles per sample", 1, 8, 1)
@@ -49,6 +50,7 @@ c.breaker = control("twist", 1, "switch", "LBY / Vary native decoy", false)
 c.breakerRange = control("twist", 1, "slider", "LBY / Random amplitude", 0, 180, 25)
 c.flick = control("twist", 1, "switch", "LBY / Alternate decoy offset", false)
 c.flickRange = control("twist", 1, "slider", "LBY / Alternating amplitude", 0, 180, 110)
+c.breakerHide = control("twist", 1, "combo", "LBY / Hide mode", {"Native", "Expose", "Hide", "Hide flick"})
 c.twist = control("twist", 2, "switch", "Twist / Add yaw offset", false)
 c.twistRange = control("twist", 2, "slider", "Twist / Amplitude", 0, 180, 30)
 c.delay = control("twist", 2, "switch", "Twist / Delay movement", false)
@@ -84,8 +86,9 @@ local function tooltip(item, text)
     if type(item.set_tooltip) == "function" then item:set_tooltip(text) end
 end
 local tips = {
-    enabled = "Enable Chaos and hide native AA controls. Requires native AA enabled.",
-    manualRespect = "Keep manual yaw; pitch and timed LBY flicks still apply.",
+    enabled = "Enable Chaos. Requires native AA enabled.",
+    manualRespect = "Keep left, right and forward manual yaw; back still gets Chaos yaw. Pitch and timed LBY flicks still apply.",
+    hideNative = "Hide the built-in Anti-Aim menu. Off keeps every native feature reachable.",
     style = "Jitter alternates; Random samples; Spin rotates; Native adds no style offset.",
     range = "Yaw offset in degrees. 60 gives jitter offsets of -60 and +60.",
     hold = "Choke cycles to hold each real-angle sample. Higher means slower changes.",
@@ -99,12 +102,13 @@ local tips = {
     extend = "Add a second yaw offset to the selected real style.",
     extendMode = "Choose a fixed, alternating, random, or rotating extra offset.",
     extendRange = "Extra offset in degrees; Spin uses this as its step.",
-    fake = "Alternate a yaw offset on sent commands after choking.",
+    fake = "Alternate a yaw offset on sent commands after choking. Chokes one command per cycle when nothing else chokes.",
     fakeRange = "Fake jitter offset in degrees on each side.",
     breaker = "Randomize the native LBY decoy. Requires the native breaker.",
     breakerRange = "Maximum random offset added to the LBY decoy.",
     flick = "Alternate the native LBY decoy offset at native breaker timing.",
     flickRange = "Alternating LBY decoy offset in degrees.",
+    breakerHide = "Native keeps the breaker's choice. Expose records the breaker yaw as real; Hide and Hide flick conceal it.",
     twist = "Add an alternating offset when native moving twist runs.",
     twistRange = "Yaw offset added to native moving twist.",
     delay = "Enable native twist movement delay. Can hold back movement.",
@@ -117,7 +121,7 @@ local tips = {
     manualMode = "Toggle: press again to clear. Hold: release to clear.",
     lastmoveRepeat = "Whether the native last-move side repeats. Off borrows the native setting until unload.",
     manualRemember = "Remember the last manual key pressed while moving for native last-move flicks. Clear resets it.",
-    clear = "Clear the script's selected manual direction.",
+    clear = "Clear the script's manual direction back to default (back).",
     report = "Print angle state, cycle counters, and hook owners to the console.",
     indicator = "Show CHAOS in the HUD indicator list while alive.",
     shotLog = "Print each enemy shot at you with the anti-aim state and desync.",
@@ -162,6 +166,12 @@ local function reset()
     parent = nil
 end
 reset()
+local function setManual(direction)
+    -- Clearing keeps ownership on back: set_manual(nil) would restore the old native direction.
+    if rage.antiaim.set_manual(direction or "back", rememberedManual) then
+        chosen, ownsManual, appliedLastmove = direction, true, rememberedManual
+    end
+end
 local function releaseManual()
     if ownsManual then rage.antiaim.set_manual(nil) end
     ownsManual, chosen = false, nil
@@ -228,19 +238,25 @@ end
 local function onBreaker(ctx)
     if parent then parent.breaker = true end
     -- Manual direction protects the ordinary yaw, but must not disable native LBY flicks.
-    if not parent or not parent.ctx.angles_allowed or ctx.result ~= nil
-        or (not c.breaker:get() and not c.flick:get()) then native(ctx); return end
-    local key = tostring(s.session) .. ":" .. tostring(ctx.body_update_time)
-    if s.breakerKey ~= key then
-        s.breakerKey = key
-        s.breakerCount = s.breakerCount + 1
-        -- Capture once: native decoy is stored across calls and must not accumulate offsets.
-        s.decoy = wrap(ctx.decoy
-            + (c.breaker:get() and sample(s.breakerCount, 7, c.breakerRange:get()) or 0)
-            + (c.flick:get() and (s.breakerCount % 2 == 0 and 1 or -1) * c.flickRange:get() or 0))
+    local owned = parent and parent.ctx.angles_allowed and ctx.result == nil
+    if owned and (c.breaker:get() or c.flick:get()) then
+        local key = tostring(s.session) .. ":" .. tostring(ctx.body_update_time)
+        if s.breakerKey ~= key then
+            s.breakerKey = key
+            s.breakerCount = s.breakerCount + 1
+            -- Capture once: native decoy is stored across calls and must not accumulate offsets.
+            s.decoy = wrap(ctx.decoy
+                + (c.breaker:get() and sample(s.breakerCount, 7, c.breakerRange:get()) or 0)
+                + (c.flick:get() and (s.breakerCount % 2 == 0 and 1 or -1) * c.flickRange:get() or 0))
+        end
+        ctx.decoy = s.decoy
     end
-    ctx.decoy = s.decoy
-    ctx:original()
+    local base = native(ctx)
+    local hide = c.breakerHide:get() - 2
+    if not owned or hide < 0 or type(base) ~= "table" then return end
+    local result = table.clone(base)
+    result.hide = hide
+    ctx.result = result
 end
 local function onTwist(ctx)
     if parent then parent.twist = true end
@@ -260,12 +276,12 @@ local function onAngles(ctx)
             rememberedManual = pendingManualPress
         end
         if appliedLastmove ~= rememberedManual then
-            if rage.antiaim.set_manual(chosen, rememberedManual) then appliedLastmove = rememberedManual end
+            setManual(chosen)
         end
     end
     pendingManualPress = nil
     local previous = parent
-    parent = {ctx = ctx, manual = c.manualRespect:get() and ctx.manual_direction >= 0}
+    parent = {ctx = ctx, manual = c.manualRespect:get() and ctx.manual_direction > 0}
     local frame = parent
     -- Restore nesting state even if native dispatch raises an error.
     local ok, base = pcall(native, ctx)
@@ -315,8 +331,17 @@ local function onPacket(ctx)
     prepare(ctx)
     local base = native(ctx)
     local syncWalk = ctx.fakewalk and c.fakewalkSync:get()
-    if not c.packet:get() or not ctx.angles_allowed or (ctx.fakewalk and not syncWalk) or ctx.shot or ctx.old_shot
+    if not ctx.angles_allowed or (ctx.fakewalk and not syncWalk) or ctx.shot or ctx.old_shot
         or ctx.fresh_jump or ctx.landing or ctx.body_update or ctx.body_preupdate then return end
+    if not c.packet:get() then
+        -- Fake jitter needs a sent command after a choke; without fake lag nothing is ever choked.
+        if c.fake:get() and base.send and ctx.lag == 0 then
+            local result = table.clone(base)
+            result.send = false
+            ctx.result = result
+        end
+        return
+    end
     -- Flush before the native deadline to allow a fresh animated first command.
     local deadline = ctx.body_update_time - ctx.time
     if ctx.mode == "stand" and deadline >= 0 and deadline <= ctx.tick_interval * 2 then return end
@@ -330,7 +355,7 @@ local callbacks = {["antiaim.angles"] = onAngles, ["antiaim.packet"] = onPacket,
     ["antiaim.view"] = onView, ["antiaim.enemy_shot"] = onEnemyShot}
 local function sync()
     local active = c.enabled:get()
-    syncNativeMenu(active)
+    syncNativeMenu(active and c.hideNative:get())
     if active ~= attached then
         reset()
         for stage, callback in pairs(callbacks) do
@@ -338,7 +363,7 @@ local function sync()
         end
         attached = active
     end
-    if not active or not c.manual:get() or not alive then releaseManual() end
+    if not active or not c.manual:get() then releaseManual() end
     movement(active and alive and c.moving:get())
     lastmoveRepeat(active)
     if indicator and type(indicator.set_enabled) == "function" then
@@ -364,14 +389,7 @@ events.tick:set(function(event)
         end
     end
     if c.clear:pressed() then nextChoice = nil end
-    if nextChoice ~= chosen then
-        if nextChoice then
-            if rage.antiaim.set_manual(nextChoice, rememberedManual) then
-                chosen, ownsManual = nextChoice, true
-                appliedLastmove = rememberedManual
-            end
-        else releaseManual() end
-    end
+    if nextChoice ~= chosen then setManual(nextChoice) end
     if not alive then reset(); status = "waiting for alive player" end
 end)
 events.ui:set(function(event)
