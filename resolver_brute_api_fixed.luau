@@ -162,26 +162,27 @@ local function on_resolve(ctx)
     if ctx.overridable ~= true then return end
 
     local s = get_state(ctx)
+    local native = keep_confident:get() and ctx:original() or nil
+    local confident = type(native) == "table" and native.confidence == 2
     local limit = confident_miss_limit:get()
-    if keep_confident:get() and (limit == 0 or s.misses < limit) then
-        local native = ctx:original()
-        if type(native) == "table" and native.confidence == 2 then
-            if s.last_step ~= "native" then
-                s.last_step = "native"
-                debug_log(string.format("#%s keeping confident native yaw %.0f misses %d",
-                    tostring(ctx.index), tonumber(native.yaw) or 0, s.misses))
-            end
-            return
+    if confident and (limit == 0 or s.misses < limit) then
+        if s.last_step ~= "native" then
+            s.last_step = "native"
+            debug_log(string.format("#%s keeping confident native yaw %.0f misses %d",
+                tostring(ctx.index), tonumber(native.yaw) or 0, s.misses))
         end
+        return
     end
 
     local candidates = build_candidates(ctx)
     if #candidates == 0 then return end
 
+    -- Brute taking over from a confident angle restarts at step 1, the safe angle when enabled.
+    local brute_misses = confident and s.misses - limit or s.misses
     local step = 1
-    if brute:get() and s.misses > 0 then
+    if brute:get() and brute_misses > 0 then
         local window = math.min(brute_steps:get() + 1, #candidates)
-        step = (s.misses % window) + 1
+        step = (brute_misses % window) + 1
     end
     local chosen = candidates[step] or candidates[1]
 
