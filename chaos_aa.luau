@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 313: manual rotated in angles stage, manual changes printed")
+print("CHAOS BUILD CHECK 314: camera-relative manual with real jitter/spin, rebind keys, fake flip on shot while fake walking")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -46,6 +46,8 @@ c.extendMode = control("fake", 2, "combo", "Extend / Mode", {"Static", "Jitter",
 c.extendRange = control("fake", 2, "slider", "Extend / Amplitude", 0, 180, 30)
 c.fake = control("fake", 1, "switch", "Fake / Jitter", false)
 c.fakeRange = control("fake", 1, "slider", "Fake / Amplitude", 0, 180, 90)
+c.shotFlip = control("fake", 1, "switch", "Fake / Flip on shot while fake walking", false)
+c.shotFlipRange = control("fake", 1, "slider", "Fake / Flip amplitude", 0, 180, 90)
 c.breaker = control("twist", 1, "switch", "LBY / Vary native decoy", false)
 c.breakerRange = control("twist", 1, "slider", "LBY / Random amplitude", 0, 180, 25)
 c.flick = control("twist", 1, "switch", "LBY / Alternate decoy offset", false)
@@ -64,14 +66,17 @@ c.manualMode = control("real", 2, "combo", "Manual / Key behavior", {"Toggle", "
 c.lastmoveRepeat = control("real", 2, "switch", "Manual / Repeat last-move side", true)
 local keys = {}
 for _, direction in ipairs({"back", "left", "right", "forward"}) do
-    keys[#keys + 1] = {name = direction, control = control("real", 2, "hotkey", "Manual / " .. direction)}
+    keys[#keys + 1] = {name = direction, control = control("real", 2, "hotkey", "Direction / " .. direction)}
 end
-c.clear = control("real", 2, "hotkey", "Manual / Clear")
+-- Toggling is done by the script on each press; the host key must report the physical hold.
+for _, item in ipairs(keys) do item.control:set_mode("hold") end
+c.clear = control("real", 2, "hotkey", "Direction / clear")
 c.report = control("lag", 2, "button", "Diagnostics / Print status")
 c.indicator = control("lag", 2, "switch", "Diagnostics / Indicator", true)
 c.shotLog = control("lag", 2, "switch", "Diagnostics / Log enemy shots", false)
 c.spin:show_if(c.style, 3)
 c.fakeRange:show_if(c.fake, 2)
+c.shotFlipRange:show_if(c.shotFlip, 2)
 c.breakerRange:show_if(c.breaker, 2)
 c.flickRange:show_if(c.flick, 2)
 c.twistRange:show_if(c.twist, 2)
@@ -102,6 +107,8 @@ local tips = {
     extendRange = "Extra offset in degrees; Spin uses this as its step.",
     fake = "Alternate a yaw offset on sent commands after choking. Chokes one command per cycle when nothing else chokes.",
     fakeRange = "Fake jitter offset in degrees on each side.",
+    shotFlip = "While fake walking, every enemy shot at you flips the fake to the other side. Stacks with Fake jitter.",
+    shotFlipRange = "Fake offset in degrees used by the shot flip.",
     breaker = "Randomize the native LBY decoy. Requires the native breaker.",
     breakerRange = "Maximum random offset added to the LBY decoy.",
     flick = "Alternate the native LBY decoy offset at native breaker timing.",
@@ -157,7 +164,7 @@ local indicator = type(indicators) == "table" and type(indicators.add) == "funct
     and indicators.add("chaos_aa3", "CHAOS") or nil
 local function reset()
     s = {cycle = 0, fakeCycle = 0, command = nil, session = nil, previousLag = nil,
-        breakerCount = 0, breakerKey = nil, realSamples = 0, fakeSamples = 0}
+        breakerCount = 0, breakerKey = nil, realSamples = 0, fakeSamples = 0, flipSide = 1}
     parent = nil
 end
 reset()
@@ -190,8 +197,7 @@ local baseTargets = {
         return wall and wrap(wall + 180)
     end,
 }
--- Base yaw sits 180 behind the head, so each direction is the head turn minus 180.
-local manualBase = {back = 0, left = -90, right = 90, forward = 180}
+local manualHead = {back = 180, left = 90, right = -90, forward = 0}
 local function onView(ctx)
     -- Manual is rotated in onAngles against the native base, so the base must stay native here.
     if chosen or (parent and parent.ctx.manual_direction > 0) then return end
@@ -203,6 +209,7 @@ local function onView(ctx)
 end
 local hitgroups = {[0] = "generic", "head", "chest", "stomach", "left arm", "right arm", "left leg", "right leg", "neck", [10] = "gear"}
 local function onEnemyShot(ctx)
+    if c.shotFlip:get() and (s.fakewalking or ctx.state == "fakewalk") then s.flipSide = -s.flipSide end
     if not c.shotLog:get() then return end
     print(string.format("Chaos AA: %s %s (%s, %d dmg, %.0fu) state=%s desync=%.1f real=%.1f fake=%.1f speed=%.0f",
         ctx.name, ctx.hit and "hit" or "missed", hitgroups[ctx.hitgroup] or tostring(ctx.hitgroup), ctx.damage,
@@ -265,8 +272,9 @@ local function onAngles(ctx)
     if not ok then error(base) end
     if not ctx.angles_allowed or type(base) ~= "table" then return end
     local result = table.clone(base)
-    -- Rotate the whole native angle (breaker and twist included) from its base onto the camera-relative manual.
-    local anchor = chosen and wrap(base.yaw - ctx.base_yaw + ctx.view_yaw + manualBase[chosen]) or base.yaw
+    -- Manual is camera-relative and independent of the native base; Chaos real and fake styles still apply on top.
+    local anchor = chosen and wrap(ctx.view_yaw + manualHead[chosen]) or base.yaw
+    s.fakewalking = ctx.fakewalk
     result.yaw = anchor
     local pitch = c.pitch:get()
     if pitch == 2 then result.pitch = 89 elseif pitch == 3 then result.pitch = 0 elseif pitch == 4 then result.pitch = -89 end
@@ -282,8 +290,11 @@ local function onAngles(ctx)
             s.lastFake = ctx.command_number
             s.fakeCycle = s.fakeCycle + 1
         end
-        if c.fake:get() then
-            result.yaw = wrap(anchor + (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get())
+        local fakeOffset = 0
+        if c.fake:get() then fakeOffset = (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get() end
+        if c.shotFlip:get() and ctx.fakewalk then fakeOffset = fakeOffset + s.flipSide * c.shotFlipRange:get() end
+        if fakeOffset ~= 0 then
+            result.yaw = wrap(anchor + fakeOffset)
             s.fakeSamples = s.fakeSamples + 1
         end
     else
