@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 314: camera-relative manual with real jitter/spin, rebind keys, fake flip on shot while fake walking")
+print("CHAOS BUILD CHECK 315: Misc > Chaos AA log output and console filter commands")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -74,6 +74,15 @@ c.clear = control("real", 2, "hotkey", "Direction / clear")
 c.report = control("lag", 2, "button", "Diagnostics / Print status")
 c.indicator = control("lag", 2, "switch", "Diagnostics / Indicator", true)
 c.shotLog = control("lag", 2, "switch", "Diagnostics / Log enemy shots", false)
+local misc = ui.create("Misc", "Chaos AA", 1)
+c.logOutput = misc and misc:combo("Log output", {"Console", "Chat", "Both"})
+c.filterHelp = misc and misc:button("Print console filter commands")
+-- Scripts cannot run console commands, so map spam is filtered by the user's con_filter and logs can go to chat instead.
+local function log(text)
+    local output = c.logOutput and c.logOutput:get() or 1
+    if output ~= 2 then print(text) end
+    if output ~= 1 and client.in_game() then client.chat_print(string.sub(text, 1, 240)) end
+end
 c.spin:show_if(c.style, 3)
 c.fakeRange:show_if(c.fake, 2)
 c.shotFlipRange:show_if(c.shotFlip, 2)
@@ -86,7 +95,7 @@ c.manualMode:show_if(c.manual, 2)
 for _, item in ipairs(keys) do item.control:show_if(c.manual, 2) end
 c.clear:show_if(c.manual, 2)
 local function tooltip(item, text)
-    if type(item.set_tooltip) == "function" then item:set_tooltip(text) end
+    if item and type(item.set_tooltip) == "function" then item:set_tooltip(text) end
 end
 local tips = {
     enabled = "Enable Chaos. Requires native AA enabled.",
@@ -129,6 +138,8 @@ local tips = {
     report = "Print angle state, cycle counters, and hook owners to the console.",
     indicator = "Show CHAOS in the HUD indicator list while alive.",
     shotLog = "Print each enemy shot at you with the anti-aim state and desync.",
+    logOutput = "Where Chaos logs go. Chat keeps them away from engine console spam (local only, never sent).",
+    filterHelp = "Print the console commands that hide engine spam such as CMaterial::PrecacheVars.",
 }
 for name, text in pairs(tips) do tooltip(c[name], text) end
 for state, item in pairs(profiles) do
@@ -211,7 +222,7 @@ local hitgroups = {[0] = "generic", "head", "chest", "stomach", "left arm", "rig
 local function onEnemyShot(ctx)
     if c.shotFlip:get() and (s.fakewalking or ctx.state == "fakewalk") then s.flipSide = -s.flipSide end
     if not c.shotLog:get() then return end
-    print(string.format("Chaos AA: %s %s (%s, %d dmg, %.0fu) state=%s desync=%.1f real=%.1f fake=%.1f speed=%.0f",
+    log(string.format("Chaos AA: %s %s (%s, %d dmg, %.0fu) state=%s desync=%.1f real=%.1f fake=%.1f speed=%.0f",
         ctx.name, ctx.hit and "hit" or "missed", hitgroups[ctx.hitgroup] or tostring(ctx.hitgroup), ctx.damage,
         ctx.distance, ctx.state, ctx.desync, ctx.real_yaw, ctx.fake_yaw, ctx.speed))
 end
@@ -386,7 +397,7 @@ events.tick:set(function(event)
     if c.clear:pressed() then nextChoice = nil end
     if nextChoice ~= chosen then
         chosen = nextChoice
-        print("Chaos AA: manual " .. (chosen or "cleared"))
+        log("Chaos AA: manual " .. (chosen or "cleared"))
         if indicator and type(indicator.set_text) == "function" then
             indicator:set_text(chosen and "CHAOS " .. string.upper(chosen) or "CHAOS")
         end
@@ -396,11 +407,18 @@ end)
 events.ui:set(function(event)
     sync()
     if event.kind == "click" and event.handle == c.report.__handle then
-        print("Chaos AA 3.0: " .. status)
-        print("manual:", chosen or "none")
+        log("Chaos AA 3.0: " .. status)
+        log("Chaos AA manual: " .. (chosen or "none"))
         if type(hooks.owner) == "function" then
-            for stage in pairs(callbacks) do print(stage, "last owner:", hooks.owner(stage)) end
+            for stage in pairs(callbacks) do log("Chaos AA " .. stage .. " owner: " .. tostring(hooks.owner(stage))) end
         end
+    end
+    if event.kind == "click" and c.filterHelp and event.handle == c.filterHelp.__handle then
+        print("Chaos AA: paste into the console to hide map spam and keep other output:")
+        print('con_filter_text ""; con_filter_enable 1; con_filter_text_out "CMaterial::PrecacheVars"')
+        print("Chaos AA: or show only script logs:")
+        print('con_filter_enable 1; con_filter_text "chaos_aa"')
+        print("Chaos AA: undo with con_filter_enable 0")
     end
 end)
 sync()
