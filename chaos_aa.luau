@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 316: logs default to local chat")
+print("CHAOS BUILD CHECK 317: LBY flick follows moved real, real held between standing LBY updates")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -53,6 +53,7 @@ c.breakerRange = control("twist", 1, "slider", "LBY / Random amplitude", 0, 180,
 c.flick = control("twist", 1, "switch", "LBY / Alternate decoy offset", false)
 c.flickRange = control("twist", 1, "slider", "LBY / Alternating amplitude", 0, 180, 110)
 c.breakerHide = control("twist", 1, "combo", "LBY / Hide mode", {"Native", "Expose", "Hide", "Hide flick"})
+c.lbyHold = control("twist", 1, "switch", "LBY / Hold real between updates", true)
 c.twist = control("twist", 2, "switch", "Twist / Add yaw offset", false)
 c.twistRange = control("twist", 2, "slider", "Twist / Amplitude", 0, 180, 30)
 c.delay = control("twist", 2, "switch", "Twist / Delay movement", false)
@@ -129,6 +130,7 @@ local tips = {
     flick = "Alternate the native LBY decoy offset at native breaker timing.",
     flickRange = "Alternating LBY decoy offset in degrees.",
     breakerHide = "Native keeps the breaker's choice. Expose records the breaker yaw as real; Hide and Hide flick conceal it.",
+    lbyHold = "While standing, real jitter, spin and freestanding change only at each LBY update, so the decoy stays away from the head.",
     twist = "Add an alternating offset when native moving twist runs.",
     twistRange = "Yaw offset added to native moving twist.",
     delay = "Enable native twist movement delay. Can hold back movement.",
@@ -181,7 +183,7 @@ local indicator = type(indicators) == "table" and type(indicators.add) == "funct
     and indicators.add("chaos_aa3", "CHAOS") or nil
 local function reset()
     s = {cycle = 0, fakeCycle = 0, command = nil, session = nil, previousLag = nil,
-        breakerCount = 0, breakerKey = nil, realSamples = 0, fakeSamples = 0, flipSide = 1}
+        breakerCount = 0, breakerKey = nil, realSamples = 0, fakeSamples = 0, flipSide = 1, lbyCycle = 0}
     parent = nil
 end
 reset()
@@ -218,11 +220,14 @@ local manualHead = {back = 180, left = 90, right = -90, forward = 0}
 local function onView(ctx)
     -- Manual is rotated in onAngles against the native base, so the base must stay native here.
     if chosen or (parent and parent.ctx.manual_direction > 0) then return end
+    local holding = ctx.mode == "stand" and c.lbyHold:get()
+    if holding and s.viewCycle == s.lbyCycle then ctx.result = {yaw = s.viewYaw}; return end
     local resolve = baseTargets[c.baseMode:get()]
     local yaw = resolve and resolve()
     local offset = c.baseOffset:get()
     if yaw == nil and offset == 0 then return end
     ctx.result = {yaw = wrap((yaw or ctx.native_yaw) + offset)}
+    s.viewCycle, s.viewYaw = holding and s.lbyCycle or nil, ctx.result.yaw
 end
 local hitgroups = {[0] = "generic", "head", "chest", "stomach", "left arm", "right arm", "left leg", "right leg", "neck", [10] = "gear"}
 local function onEnemyShot(ctx)
@@ -278,6 +283,22 @@ local function onTwist(ctx)
     result.yaw = wrap(base.yaw + s.side * c.twistRange:get())
     ctx.result = result
 end
+local function realOffset(ctx, index, side)
+    local amount = c.profiles:get() and profiles[ctx.mode]:get() or c.range:get()
+    local style, offset = c.style:get(), 0
+    if style == 1 then offset = side * amount
+    elseif style == 2 then offset = sample(index, 1, amount)
+    elseif style == 3 then offset = wrap(index * c.spin:get()) end
+    if c.extend:get() then
+        local mode, range = c.extendMode:get(), c.extendRange:get()
+        local extra = range
+        if mode == 2 then extra = side * range
+        elseif mode == 3 then extra = sample(index, 2, range)
+        elseif mode == 4 then extra = wrap(index * range) end
+        offset = offset + extra
+    end
+    return offset
+end
 local function onAngles(ctx)
     prepare(ctx)
     local previous = parent
@@ -289,20 +310,25 @@ local function onAngles(ctx)
     if not ok then error(base) end
     if not ctx.angles_allowed or type(base) ~= "table" then return end
     local result = table.clone(base)
-    -- Manual is camera-relative and independent of the native base; Chaos real and fake styles still apply on top.
-    local anchor = chosen and wrap(ctx.view_yaw + manualHead[chosen]) or base.yaw
-    s.fakewalking = ctx.fakewalk
+    local send = ctx.final_packet
+    if s.sendCommand == ctx.command_number then send = s.send end
+    local faking = send and ctx.lag > 0
+    local flick = ctx.body_update or ctx.body_preupdate
+    if flick and not s.inFlick then s.lbyCycle = s.lbyCycle + 1 end
+    s.inFlick, s.fakewalking = flick, ctx.fakewalk
+    if not flick and not faking then s.nativeReal = base.yaw end
+    -- Moving the real must carry the native flick along, or the LBY decoy lands on the head.
+    local anchor = base.yaw
+    if chosen then
+        local flickDelta = flick and wrap(base.yaw - (s.nativeReal or base.yaw)) or 0
+        anchor = wrap(ctx.view_yaw + manualHead[chosen] + flickDelta)
+    end
     result.yaw = anchor
     local pitch = c.pitch:get()
     if pitch == 2 then result.pitch = 89 elseif pitch == 3 then result.pitch = 0 elseif pitch == 4 then result.pitch = -89 end
     ctx.result = result
-    -- Manual direction protects yaw, not the independent pitch selection.
-    -- Preserve timed LBY yaw; merely entering breaker/twist is not an LBY update.
-    if frame.manual or (ctx.mode == "walk" and not c.moving:get())
-        or ctx.body_update or ctx.body_preupdate then return end
-    local send = ctx.final_packet
-    if s.sendCommand == ctx.command_number then send = s.send end
-    if send and ctx.lag > 0 then
+    if frame.manual or (ctx.mode == "walk" and not c.moving:get()) then return end
+    if faking and not flick then
         if s.lastFake ~= ctx.command_number then
             s.lastFake = ctx.command_number
             s.fakeCycle = s.fakeCycle + 1
@@ -315,26 +341,13 @@ local function onAngles(ctx)
             s.fakeSamples = s.fakeSamples + 1
         end
     else
-        -- Every choked or unfaked command carries the cycle's real sample, not only the first one.
-        local amount = c.profiles:get() and profiles[ctx.mode]:get() or c.range:get()
-        local style, offset = c.style:get(), 0
-        if style == 1 then offset = s.side * amount
-        elseif style == 2 then offset = sample(s.index, 1, amount)
-        elseif style == 3 then offset = wrap(s.index * c.spin:get()) end
-        if c.extend:get() then
-            local mode, range = c.extendMode:get(), c.extendRange:get()
-            local extra = range
-            if mode == 2 then extra = s.side * range
-            elseif mode == 3 then extra = sample(s.index, 2, range)
-            elseif mode == 4 then extra = wrap(s.index * range) end
-            offset = offset + extra
-        end
-        result.yaw = wrap(anchor + offset)
+        -- Standing hold samples once per LBY cycle so the real never drifts onto the decoy between updates.
+        local index = (c.lbyHold:get() and ctx.mode == "stand") and s.lbyCycle or s.index
+        result.yaw = wrap(anchor + realOffset(ctx, index, index % 2 == 0 and -1 or 1))
         if ctx.lag == 0 then s.realSamples = s.realSamples + 1 end
     end
-    ctx.result = result
-    status = string.format("%s cmd=%d cycle=%d side=%d lag=%d send=%s real=%d fake=%d yaw=%.1f",
-        ctx.mode, ctx.command_number, s.cycle, s.side, ctx.lag, tostring(send), s.realSamples, s.fakeSamples, result.yaw)
+    status = string.format("%s cmd=%d cycle=%d lby=%d lag=%d send=%s real=%d fake=%d yaw=%.1f",
+        ctx.mode, ctx.command_number, s.cycle, s.lbyCycle, ctx.lag, tostring(send), s.realSamples, s.fakeSamples, result.yaw)
 end
 local function decidePacket(ctx)
     prepare(ctx)
