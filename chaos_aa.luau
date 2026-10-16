@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 321: moving yaw keeps the widest predicted feet gap")
+print("CHAOS BUILD CHECK 322: real and fake jitter centers")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -27,6 +27,7 @@ c.manualStatic = control("real", 1, "switch", "Main / Static manual yaw", false)
 c.hideNative = control("real", 1, "switch", "Main / Hide native menu", false)
 c.style = control("real", 1, "combo", "Real / Style", {"Jitter", "Random", "Spin", "Native"})
 c.range = control("real", 1, "slider", "Real / Jitter or random amplitude", 0, 180, 60)
+c.realCenter = control("real", 1, "slider", "Real / Jitter center", -180, 180, 0)
 c.hold = control("real", 1, "slider", "Real / Cycles per sample", 1, 8, 1)
 c.spin = control("real", 1, "slider", "Real / Spin degrees per sample", 1, 180, 35)
 c.pitch = control("real", 1, "combo", "Real / Pitch", {"Native", "Down", "Level", "Up"})
@@ -49,6 +50,7 @@ c.extendMode = control("fake", 2, "combo", "Extend / Mode", {"Static", "Jitter",
 c.extendRange = control("fake", 2, "slider", "Extend / Amplitude", 0, 180, 30)
 c.fake = control("fake", 1, "switch", "Fake / Jitter", false)
 c.fakeRange = control("fake", 1, "slider", "Fake / Amplitude", 0, 180, 90)
+c.fakeCenter = control("fake", 1, "slider", "Fake / Jitter center", -180, 180, 0)
 c.shotFlip = control("fake", 1, "switch", "Fake / Flip on shot while fake walking", false)
 c.shotFlipRange = control("fake", 1, "slider", "Fake / Flip amplitude", 0, 180, 90)
 c.breaker = control("twist", 1, "switch", "LBY / Vary native decoy", false)
@@ -97,6 +99,7 @@ local function log(text)
 end
 c.spin:show_if(c.style, 3)
 c.fakeRange:show_if(c.fake, 2)
+c.fakeCenter:show_if(c.fake, 2)
 c.shotFlipRange:show_if(c.shotFlip, 2)
 c.breakerRange:show_if(c.breaker, 2)
 c.flickRange:show_if(c.flick, 2)
@@ -116,6 +119,7 @@ local tips = {
     hideNative = "Hide the built-in Anti-Aim menu. Off keeps every native feature reachable.",
     style = "Jitter alternates; Random samples; Spin rotates; Native adds no style offset.",
     range = "Yaw offset in degrees. 60 gives jitter offsets of -60 and +60.",
+    realCenter = "Angle the real style jitters around, on top of any base, native freestand or hidden head. 30 with amplitude 60 swings between -30 and +90.",
     hold = "Choke cycles to hold each real-angle sample. Higher means slower changes.",
     spin = "Degrees rotated per real-angle sample.",
     pitch = "Choose native pitch, down (+89), level (0), or up (-89).",
@@ -132,6 +136,7 @@ local tips = {
     extendRange = "Extra offset in degrees; Spin uses this as its step.",
     fake = "Alternate a yaw offset on sent commands after choking. Chokes one command per cycle when nothing else chokes.",
     fakeRange = "Fake jitter offset in degrees on each side.",
+    fakeCenter = "Angle the fake jitters around. 30 with amplitude 90 swings between -60 and +120.",
     shotFlip = "While fake walking, every enemy shot at you flips the fake to the other side. Stacks with Fake jitter.",
     shotFlipRange = "Fake offset in degrees used by the shot flip.",
     breaker = "Randomize the native LBY decoy. Requires the native breaker.",
@@ -139,7 +144,7 @@ local tips = {
     flick = "Alternate the native LBY decoy offset at native breaker timing.",
     flickRange = "Alternating LBY decoy offset in degrees.",
     breakerHide = "Native keeps the breaker's choice. Expose records the breaker yaw as real; Hide and Hide flick conceal it.",
-    lbyHold = "While standing, real jitter, spin and freestanding change only at each LBY update, so the decoy stays away from the head.",
+    lbyHold = "While standing, real jitter, spin and freestanding change only at each LBY update, so the decoy stays away from the head. Turn off for full-speed standing jitter.",
     twist = "Add an alternating offset when native moving twist runs.",
     twistRange = "Yaw offset added to native moving twist.",
     delay = "Enable native twist movement delay. Can hold back movement.",
@@ -376,7 +381,7 @@ local function realOffset(ctx, index, side)
         elseif mode == 4 then extra = wrap(index * range) end
         offset = offset + extra
     end
-    return offset
+    return offset + c.realCenter:get()
 end
 local function widestYaw(candidates)
     local best, bestGap = nil, -1
@@ -425,7 +430,7 @@ local function onAngles(ctx)
             s.fakeCycle = s.fakeCycle + 1
         end
         local fakeOffset = 0
-        if c.fake:get() then fakeOffset = (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get() end
+        if c.fake:get() then fakeOffset = c.fakeCenter:get() + (s.fakeCycle % 2 == 0 and 1 or -1) * c.fakeRange:get() end
         if c.shotFlip:get() and ctx.fakewalk then fakeOffset = fakeOffset + s.flipSide * c.shotFlipRange:get() end
         -- A script-placed real sends its fake opposite; otherwise the fake would sit on the head.
         if override or fakeOffset ~= 0 then
@@ -441,7 +446,8 @@ local function onAngles(ctx)
             local yaw = wrap(anchor + realOffset(ctx, index, index % 2 == 0 and -1 or 1))
             if ctx.mode == "walk" and not override and c.movingGap:get() then
                 local amount = c.profiles:get() and profiles.walk:get() or c.range:get()
-                yaw = widestYaw({yaw, anchor, wrap(anchor + amount), wrap(anchor - amount)}) or yaw
+                local center = wrap(anchor + c.realCenter:get())
+                yaw = widestYaw({yaw, center, wrap(center + amount), wrap(center - amount)}) or yaw
             end
             result.yaw = yaw
         end
