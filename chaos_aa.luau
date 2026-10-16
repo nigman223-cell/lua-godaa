@@ -1,4 +1,4 @@
-print("CHAOS BUILD CHECK 315: Misc > Chaos AA log output and console filter commands")
+print("CHAOS BUILD CHECK 316: logs default to local chat")
 -- Chaos AA 3.0. Divinity LUAU_API.md, March 2018 first-command model.
 -- Derived from chaos_aa_extend_jitter_lby: native base, jitter, Extend, LBY, twist.
 -- Real samples advance by observed choke cycles, never command parity.
@@ -75,13 +75,19 @@ c.report = control("lag", 2, "button", "Diagnostics / Print status")
 c.indicator = control("lag", 2, "switch", "Diagnostics / Indicator", true)
 c.shotLog = control("lag", 2, "switch", "Diagnostics / Log enemy shots", false)
 local misc = ui.create("Misc", "Chaos AA", 1)
-c.logOutput = misc and misc:combo("Log output", {"Console", "Chat", "Both"})
+local logChoices = {"Chat", "Both", "Console"}
+c.logOutput = misc and misc:combo("Log destination", logChoices)
+    or control("lag", 2, "combo", "Diagnostics / Log destination", logChoices)
 c.filterHelp = misc and misc:button("Print console filter commands")
 -- Scripts cannot run console commands, so map spam is filtered by the user's con_filter and logs can go to chat instead.
+local function chatSafe(text)
+    -- Player names can carry invisible multi-byte tags; chat rejects broken or oversized UTF-8.
+    return string.sub(string.gsub(text, "[\128-\255]", ""), 1, 240)
+end
 local function log(text)
-    local output = c.logOutput and c.logOutput:get() or 1
-    if output ~= 2 then print(text) end
-    if output ~= 1 and client.in_game() then client.chat_print(string.sub(text, 1, 240)) end
+    local output = c.logOutput:get()
+    local chatted = output ~= 3 and client.in_game() and client.chat_print(chatSafe(text))
+    if output ~= 1 or not chatted then print(text) end
 end
 c.spin:show_if(c.style, 3)
 c.fakeRange:show_if(c.fake, 2)
@@ -138,7 +144,7 @@ local tips = {
     report = "Print angle state, cycle counters, and hook owners to the console.",
     indicator = "Show CHAOS in the HUD indicator list while alive.",
     shotLog = "Print each enemy shot at you with the anti-aim state and desync.",
-    logOutput = "Where Chaos logs go. Chat keeps them away from engine console spam (local only, never sent).",
+    logOutput = "Where Chaos logs go. Chat (local only, never sent) keeps them out of engine console spam; falls back to console when chat is unavailable.",
     filterHelp = "Print the console commands that hide engine spam such as CMaterial::PrecacheVars.",
 }
 for name, text in pairs(tips) do tooltip(c[name], text) end
